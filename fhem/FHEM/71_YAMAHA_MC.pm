@@ -210,6 +210,9 @@ sub YAMAHA_MC_Initialize($)
   $hash->{UndefFn}      = "YAMAHA_MC_Undef";
   $hash->{ShutdownFn}	= "YAMAHA_MC_Shutdown";
   $hash->{DeleteFn}	    = "YAMAHA_MC_Delete";
+	
+	$hash->{ReadFn}          = "YAMAHA_MC_Read";
+
 
 # modules attributes
   $hash->{AttrList}     = "do_not_notify:0,1 ".
@@ -275,6 +278,8 @@ sub YAMAHA_MC_Define($$)  # only called when defined, not on reload.
   unless(defined($hash->{PowerOnInProgress})) {$hash->{PowerOnInProgress}=0;}
   unless(defined($hash->{LastTtsFile})) {$hash->{LastTtsFile}="";}
   unless(defined($hash->{helper}{TIMEOUT_COUNT})) {$hash->{helper}{TIMEOUT_COUNT}=0;}
+	unless(defined($hash->{UdpClientPort})) {$hash->{UdpClientPort}=41100;}
+
       
     
   $name = $a[0];
@@ -301,6 +306,9 @@ sub YAMAHA_MC_Define($$)  # only called when defined, not on reload.
     return "ERROR: invalid IPv4 address or fqdn: '$host'"
   }
   
+	#open UDP Client for incoming events
+	YAMAHA_MC_OpenUDPConn($hash);
+
 
    # if an update interval was given which is greater than zero, use it.
     if(defined($a[4]) and $a[4] > 0)
@@ -673,7 +681,6 @@ sub YAMAHA_MC_GetStatus($;$)
 	# get current location info, including zones
 	Log3 $name, 4, "$type: $name YAMAHA_MC_GetStatus fetching getLocationInfo now";
 	YAMAHA_MC_getLocationInfo($hash,$priority);	
-	
 	
 	Log3 $name, 4, "YAMAHA_MC_GetStatus Device is powered off, calling getFeatures";
 	YAMAHA_MC_httpRequestQueue($hash, "getFeatures", "", {options => {at_first => 0, priority => $priority, unless_in_queue => 1}}); # call fn that will do the http request
@@ -2820,7 +2827,9 @@ sub YAMAHA_MC_HandleCmdQueue($$$)
 	 $url =~ s/v1/v$shortAPI/g;
 	 
 	 Log3 $name, 4, "$type ($name) - YAMAHA_MC_HandleCmdQueue: cmd=$reqCmd starte httpRequest replaced url => $url";			
-  
+  	
+		my $port = $hash->{UdpClientPort};	
+
 	  my $params =  {
 		url         => $url,
 		timeout     => AttrVal($name, "request-timeout", 4),
@@ -2828,9 +2837,9 @@ sub YAMAHA_MC_HandleCmdQueue($$$)
 		keepalive => 0,
 		httpversion => "1.1",
 		loglevel   => ($hash->{helper}{AVAILABLE} ? undef : 5),
-		httpversion => "1.0",
 		#hideurl     => 0,
 		method      => "GET",
+		header 			=> "X-AppName: MusicCast/$shortAPI\r\nX-AppPort: $port",
 		hash        => $hash,
 		cmd         => $reqCmd,     #passthrouht to YAMAHA_MC_httpRequestParse
 		plist       => $plist,   #passthrouht to YAMAHA_MC_httpRequestParse
@@ -2988,6 +2997,110 @@ sub YAMAHA_MC_getNextRequestHash($)
 		Log3 $name, 4, "YAMAHA_MC ($name) YAMAHA_MC_getNextRequestHash - waiting for next call of YAMAHA_MC_getNextRequestHash ";
         return undef;
     }
+}
+
+sub YAMAHA_MC_CloseUDPConn($){
+	 my ($hash) = @_;
+  my $name = $hash->{NAME};
+
+  if( !$hash->{CD} ) {
+    Log3 $name, 2, "YAMAHA_MC $name: trying to close a non socket hash";
+    return undef;
+  }
+
+  close($hash->{CD});
+  delete($hash->{CD});
+  delete($selectlist{$name});
+  delete($hash->{FD});
+}
+
+sub YAMAHA_MC_OpenUDPConn($) {
+	my ($hash) = @_;
+	my $name = $hash->{NAME};
+	my $conn;
+	my $port = 41100;
+	## Check if connection can be opened	
+
+	# Init udp client port, for each device one listening port
+  $data{YAMAHA_MC_UDPCLIENTPORTSTART} = 41100 unless(defined($data{YAMAHA_MC_UDPCLIENTPORTSTART}));
+	$port =$data{YAMAHA_MC_UDPCLIENTPORTSTART};
+	$data{YAMAHA_MC_UDPCLIENTPORTSTART}++;
+
+	eval 
+	{
+		$conn = new IO::Socket::INET (
+			LocalPort => $port,
+			Proto     => 'udp'
+		);
+		1;
+	}
+	or do 
+	{
+		### Log Entry for debugging purposes
+		Log3 $name, 2, "YAMAHA_MC $name: IO::Socket::INET Error  : " . $@;
+		
+		return
+	};
+
+	$hash->{UdpClientPort} = $port;
+	Log3 $name, 5, "YAMAHA_MC $name: port        : " . $port;
+	Log3 $name, 5, "YAMAHA_MC $name: Connection        : " . Dumper($conn);
+	
+	if (defined($conn)) {
+		$hash->{FD}    		= $conn->fileno();
+		$hash->{CD}				= $conn;
+		$selectlist{$name}	= $hash;
+		
+		### Log Entry for debugging purposes
+		Log3 $name, 3, "YAMAHA_MC $name: Connection has been established";
+	}
+	else {
+		### Log Entry for debugging purposes
+		Log3 $name, 2, "YAMAHA_MC $name: Connection has NOT been established";
+	}
+	return
+}
+
+# ------------------------------------------------------------------------------
+# # Read udp packets from musiccast device
+sub YAMAHA_MC_Read($) {
+	my ($hash) = @_;
+	my $name = $hash->{NAME};
+	my $buf;
+	my $data;
+
+	$hash->{CD}->recv($buf, 1024);
+
+	### Log Entry for debugging purposes
+	Log3 $name, 2, "YAMAHA_MC ($name) : UDP Client said buf               : " . $buf;
+
+	Dispatch($hash, $buf);
+	YAMAHA_MC_udpEventParse($hash, $buf);
+}
+
+sub YAMAHA_MC_udpEventParse($$$)
+{
+		my($hash, $data) = @_;
+		my ($name,$type) = ($hash->{NAME},$hash->{TYPE});
+		if (!defined $hash->{helper}{noPm_JSON})
+    	{
+			if ($data =~ /^\{/) { # $data contains json
+        use JSON;
+        use utf8;
+        use Encode qw( encode_utf8 );
+        use JSON   qw( decode_json );        
+
+        # hash %res contains answer that must be parsed and be written into readings
+        # with readings*Update...
+        my %res = %{decode_json(encode_utf8($data))};
+        my @getStatusVal = split(/\,/ , $data); 
+
+        #Dumps hash to log, there you can see Yamaha's response
+        #see: https://wiki.selfhtml.org/wiki/Perl/Hashes
+	    	Log3 $name, 2, "$type: $name YAMAHA_MC_udpEventParse got json event, following Dumper von result \n";
+        Log3 $name, 2, Dumper(%res);
+			}
+		}
 }
 
 # ------------------------------------------------------------------------------
@@ -4650,8 +4763,6 @@ sub YAMAHA_MC_UnLink($$$@)
 	  
 	  #---------------
 	  
-	  
-				
 	  #Log3 $name, 4, "$name : UNLink Musiccast adding $clientIp to ClientList";	
 	  #here the delete from lsit is missing
 	  #push @clientListIP, $clientIp;
