@@ -39,6 +39,7 @@ use strict;
 use Blocking;
 use warnings;
 use Data::Dumper;
+use Data::UUID;
 use HttpUtils;
 use Time::HiRes qw(gettimeofday sleep);
 use Encode qw(decode encode);
@@ -66,7 +67,7 @@ sub YAMAHA_MC_Attr(@);
 sub YAMAHA_MC_Undefine($$);
 sub YAMAHA_MC_UpdateLists($;$);
 sub YAMAHA_MC_httpRequestQueue($$$;$);
-sub YAMAHA_MC_getDistributionInfo($);
+sub YAMAHA_MC_getDistributionInfo($$);
 sub YAMAHA_MC_hash_replace (\%$$);
 sub YAMAHA_MC_volume_abs2rel($$);
 sub YAMAHA_MC_volume_rel2abs($$);
@@ -630,6 +631,10 @@ sub YAMAHA_MC_GetStatus($;$)
 		
 		Log3 $name, 4, "$type: $name YAMAHA_MC_GetStatus updating ListValues for cmd now";
         YAMAHA_MC_UpdateLists($hash,$priority);	
+
+		# get distribution info
+		Log3 $name, 4, "$type: $name YAMAHA_MC_GetStatus fetching getLocationInfo now";
+		YAMAHA_MC_getDistributionInfo($hash,$priority);
 		
     }
     else{
@@ -864,13 +869,12 @@ sub YAMAHA_MC_getDeviceInfo($;$)
 # YAMAHA_MC_getDistributionInfo
 # queries infos about linked devices
 # ------------------------------------------------------------------------------
-sub YAMAHA_MC_getDistributionInfo($)
+sub YAMAHA_MC_getDistributionInfo($$)
 {
-    my ($hash) = @_;  
+    my ($hash, $priority) = @_;  
     my $name = $hash->{NAME};
     my $HOST = $hash->{HOST};
 	
-	my $priority = 3; #unless(defined($priority));
     
 	Log3 $name, 4, "$name YAMAHA_MC_getDistributionInfo cancelled, missing parameter Host=$hash->{HOST} " if(!defined($hash->{HOST}));
     return undef if(not defined($HOST));
@@ -3961,7 +3965,7 @@ sub YAMAHA_MC_httpRequestParse($$$)
 				my $group_id = $res{"group_id"}; 
 				my $group_role = $res{"role"}; 	
 				
-                $hash->{dist_group_name} = $group_name;				
+        $hash->{dist_group_name} = $group_name;				
 				$hash->{dist_group_id} = $group_id;				
 				$hash->{dist_group_role} = $group_role;				
 				
@@ -4322,7 +4326,7 @@ sub YAMAHA_MC_httpRequestDirect($$$@)
     url         => $url,
     timeout     => 10,
     keepalive   => 0,
-    httpversion => "1.0",
+    httpversion => "1.1",
     hideurl     => 0,
     method      => $hash->{HTTPMETHOD},
 	data        => $hash->{POSTDATA},
@@ -4360,9 +4364,10 @@ sub YAMAHA_MC_Link($$$@)
 
   return if (IsDisabled $name);
   
-  my $group_id = "";
+  my $group_id =  $hash->{dist_group_id};
+	my $groupName = $hash->{dist_group_name};
+	my $group_role = $hash->{dist_group_role};
   my $sendto="";
-  my $groupName = "";
   my %postdata_hash = "";
   my $json = "";
   my $serverHost = $hash->{HOST};
@@ -4370,6 +4375,20 @@ sub YAMAHA_MC_Link($$$@)
   unless(defined($hash->{location_name})) {$hash->{NAME}=$hash->{HOST};}
   my $locationName = $hash->{location_name};
   
+  my $isNewServer = 0;
+
+	# create new groupid if this device is not already a server
+	if($group_role ne 'server')
+	{
+		  Log3 $name, 4, "$hash->{TYPE} $name: Link Musiccast Devices $serverHost is a new server";
+			$isNewServer = 1;
+		  # create groupid
+			$ug    = Data::UUID->new;
+			$uuid = $ug->create_str();
+      $group_id =	$param =~ s/-//g;
+			Log3 $name, 4, "$hash->{TYPE} $name: Link Musiccast Devices created new groupId: $group_id";
+
+	}
   
   Log3 $name, 4, "$hash->{TYPE} $name: Link Musiccast Devices server is $serverHost with locatioName $locationName";
   Log3 $name, 4, "$hash->{TYPE} $name: Link Musiccast Devices try getting ip of CLient=".$plist;
@@ -4402,7 +4421,6 @@ sub YAMAHA_MC_Link($$$@)
 			  #------------------------------------------------
 			  #sent to client
 			  #post /YamahaExtendedControl/v1/dist/setClientInfo
-			  $group_id = "d2d82d2b86434a35a35ad77c7ec0241c";
 			  my @zones = ('main');
 			  
 			  Log3 $name, 4, "$hash->{TYPE} $name : Link Musiccast send setClientInfo to $clientIp zone $clientZone";
@@ -4423,7 +4441,7 @@ sub YAMAHA_MC_Link($$$@)
 			  # Read Disribution Info for CLient
 			  Log3 $name, 4, "$hash->{TYPE} $name : Link Musiccast getting DistributionInfo for $mc_client ";		  
 			  Log3 $name, 4, "$name : Link Musiccast getting DistributionInfo Ende for ". $clienthash->{NAME}; 
-			  YAMAHA_MC_getDistributionInfo($clienthash);
+			  YAMAHA_MC_getDistributionInfo($clienthash, 3);
 			  Log3 $name, 4, "$clienthash->{NAME} $name : Link Musiccast getting DistributionInfo End";
 						
 			  Log3 $name, 4, "$name : Link Musiccast adding $clientIp to ClientList";	
@@ -4464,7 +4482,12 @@ sub YAMAHA_MC_Link($$$@)
   #------------------------------------------------
   # start Distribution - sending cmd to server 
   #http://192.168.0.25/YamahaExtendedControl/v1/dist/startDistribution?num=0
-  $cmd="startDistribution?num=0"; 
+	if($isNewServer) {
+  	$cmd="startDistribution?num=0"; 
+	} 
+	else {
+		$cmd="startDistribution?num=1";
+	}
   $sendto="$serverHost"; # Server
   $hash->{HTTPMETHOD}="GET";
    
@@ -4538,7 +4561,7 @@ sub YAMAHA_MC_UnLink($$$@)
   return if (IsDisabled $name);
   
   my $group_id = "";
-  my $old_group_id = "d2d82d2b86434a35a35ad77c7ec0241c";
+  my $old_group_id = $hash->{dist_group_id};
   my $sendto="";
   my $groupName = "";
   my %postdata_hash = "";
