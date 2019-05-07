@@ -39,7 +39,6 @@ use strict;
 use Blocking;
 use warnings;
 use Data::Dumper;
-use Data::UUID;
 use HttpUtils;
 use Time::HiRes qw(gettimeofday sleep);
 use Encode qw(decode encode);
@@ -4372,8 +4371,8 @@ sub YAMAHA_MC_Link($$$@)
   my $json = "";
   my $serverHost = $hash->{HOST};
   my $serverZone = $hash->{ZONE};
-  unless(defined($hash->{location_name})) {$hash->{NAME}=$hash->{HOST};}
-  my $locationName = $hash->{location_name};
+  unless(defined($hash->{network_name})) {$hash->{NAME}=$hash->{HOST};}
+  my $network_name = $hash->{network_name};
   
   my $isNewServer = 0;
 
@@ -4382,15 +4381,14 @@ sub YAMAHA_MC_Link($$$@)
 	{
 		  Log3 $name, 4, "$hash->{TYPE} $name: Link Musiccast Devices $serverHost is a new server";
 			$isNewServer = 1;
+
 		  # create groupid
-			$ug    = Data::UUID->new;
-			$uuid = $ug->create_str();
-      $group_id =	$param =~ s/-//g;
+      $group_id =	createUniqueId();
 			Log3 $name, 4, "$hash->{TYPE} $name: Link Musiccast Devices created new groupId: $group_id";
 
 	}
   
-  Log3 $name, 4, "$hash->{TYPE} $name: Link Musiccast Devices server is $serverHost with locatioName $locationName";
+  Log3 $name, 4, "$hash->{TYPE} $name: Link Musiccast Devices server is $serverHost with networkname $network_name";
   Log3 $name, 4, "$hash->{TYPE} $name: Link Musiccast Devices try getting ip of CLient=".$plist;
    
   my $clientName= $plist;
@@ -4516,10 +4514,10 @@ sub YAMAHA_MC_Link($$$@)
   Log3 $name, 4, "$hash->{TYPE} $name : Count Client IPs ".$countClientIp; 
   Log3 $name, 4, "$hash->{TYPE} $name : Count Client IPs2 ".$countClientIp2; 
   if ($countClientIp>0) {
-    $groupName = $locationName." +".($countClientIp+1) ." Räume";
+    $groupName = $network_name." +".($countClientIp+1) ." Räume";
   }
   else {
-    $groupName = $locationName." +".($countClientIp+1) ." Raum";
+    $groupName = $network_name." +".($countClientIp+1) ." Raum";
   }	
   %postdata_hash = ('name'=>$groupName);
   $json = encode_json \%postdata_hash;
@@ -4568,9 +4566,9 @@ sub YAMAHA_MC_UnLink($$$@)
   my $json = "";
   my $serverHost = $hash->{HOST};
   my $serverZone = $hash->{ZONE};
-  my $locationName = $hash->{location_name};
+  my $network_name = $hash->{network_name};
   
-  Log3 $name, 4, "$hash->{TYPE} $name: UNLink Musiccast Devices server is $serverHost with locatioName $locationName";
+  Log3 $name, 4, "$hash->{TYPE} $name: UNLink Musiccast Devices server is $serverHost with networkname $network_name";
   Log3 $name, 4, "$hash->{TYPE} $name: UNLink Musiccast Devices try getting ip of CLient=".$plist;
    
   my $clientName= $plist;
