@@ -281,6 +281,9 @@ sub YAMAHA_MC_Define($$)  # only called when defined, not on reload.
   $type = $a[1];
   $host = $a[2];
   $hash->{PORT} = !$a[3] ? 80 : $a[3];
+
+  # save all Yamaha Devices in a hash ip -> name 
+  $data{YAMAHA_MC_IPLIST}{$host} = $name;
   
   # would be better to get this from http like
   # http://192.168.0.28:49154/MediaRenderer/desc.xml
@@ -3968,15 +3971,21 @@ sub YAMAHA_MC_httpRequestParse($$$)
 				$hash->{dist_group_id} = $group_id;				
 				$hash->{dist_group_role} = $group_role;				
 				
+				my @clientNames;
 				my $client_list = $res{"client_list"}; 				
-				$hash->{helper}{client_list} = () unless(defined($hash->{helper}{client_list}));
-			
-			
-			    if (defined $client_list) {
+				$hash->{helper}{client_list} = () unless(defined($hash->{helper}{client_list}));	  
+				if (defined $client_list) {
 				  Log3 $name, 4, "YAMAHA_MC ($name) YAMAHA_MC_httpRequestParse - found client_list "; 	 					  				  
-				
-				}  
-				  
+					for my $clientObject (@$client_list) {
+							my $clientIp = $clientObject->{"ip_address"};
+							my $clientName = $data{YAMAHA_MC_IPLIST}{$clientIp};
+							if (defined $clientName) {
+								Log3 $name, 4, "YAMAHA_MC ($name) YAMAHA_MC_httpRequestParse - found fhem musiccast client: $clientName";
+								push @clientNames, $clientName;
+							}					  				  
+					}
+				}
+				readingsSingleUpdate($hash, "linkedClients", join(';', @clientNames), 1 );	
 			 }		 
             elsif($cmd eq "getBluetoothInfo"){
 				
@@ -4480,12 +4489,16 @@ sub YAMAHA_MC_Link($$$@)
   #------------------------------------------------
   # start Distribution - sending cmd to server 
   #http://192.168.0.25/YamahaExtendedControl/v1/dist/startDistribution?num=0
-	if($isNewServer) {
-  	$cmd="startDistribution?num=0"; 
-	} 
-	else {
-		$cmd="startDistribution?num=1";
-	}
+	# was hat die num=0 oder num=1 in der Doku genau zu bedeuten?
+	# eventuell muss diese angepasst werden.
+	#if($isNewServer) {
+  #	$cmd="startDistribution?num=0"; 
+	#} 
+	#else {
+	#	$cmd="startDistribution?num=1";
+	#}
+
+	$cmd="startDistribution?num=0"; 
   $sendto="$serverHost"; # Server
   $hash->{HTTPMETHOD}="GET";
    
@@ -4506,18 +4519,15 @@ sub YAMAHA_MC_Link($$$@)
   $sendto="$serverHost"; # Server
   $hash->{PORT}="80";
   $hash->{HTTPMETHOD}="POST";
-  $cmd="setGroupName"; 
-  
-  my $countClientIp=$#clientListIP;
-  my $countClientIp2=scalar(@clientListIP);
+  $cmd="setGroupName";   
+  my $countClientIp=scalar(@clientListIP);
   
   Log3 $name, 4, "$hash->{TYPE} $name : Count Client IPs ".$countClientIp; 
-  Log3 $name, 4, "$hash->{TYPE} $name : Count Client IPs2 ".$countClientIp2; 
-  if ($countClientIp>0) {
-    $groupName = $network_name." +".($countClientIp+1) ." Räume";
+  if ($countClientIp>1) {
+    $groupName = $network_name." +".($countClientIp) ." Räume";
   }
   else {
-    $groupName = $network_name." +".($countClientIp+1) ." Raum";
+    $groupName = $network_name." +".($countClientIp) ." Raum";
   }	
   %postdata_hash = ('name'=>$groupName);
   $json = encode_json \%postdata_hash;
@@ -4558,7 +4568,7 @@ sub YAMAHA_MC_UnLink($$$@)
 
   return if (IsDisabled $name);
   
-  my $group_id = "";
+  my $reset_group_id = "";
   my $old_group_id = $hash->{dist_group_id};
   my $sendto="";
   my $groupName = "";
@@ -4600,14 +4610,13 @@ sub YAMAHA_MC_UnLink($$$@)
 	  #------------------------------------------------
 	  #an Receiver -> als Client setzen
 	  #post /YamahaExtendedControl/v1/dist/setClientInfo  
-	  $group_id = "";   
 		
 	  Log3 $name, 4, "$hash->{TYPE} $name : UNLink Musiccast send setClientInfo";
 
 	  $cmd="setClientInfo"; 
 	  $sendto="$clientIp"; # Client  
 		
-	  %postdata_hash = ('group_id'=>$group_id,'zone'=>$clientZone);
+	  %postdata_hash = ('group_id'=>$reset_group_id,'zone'=>$clientZone);
 	  $json = encode_json \%postdata_hash;
 	  Log3 $name, 4, "$hash->{TYPE} $name : UnLink Musiccast send setClientInfo to $sendto Zone $clientZone Json Request ".$json;
 	  $hash->{POSTDATA} = $json;  
@@ -4689,7 +4698,7 @@ sub YAMAHA_MC_UnLink($$$@)
     
 
  if ($unlinkall==1) {
-      %postdata_hash = ('group_id'=>"");
+      %postdata_hash = ('group_id'=>$reset_group_id);
 	  $json = encode_json \%postdata_hash;
 	  
 	  Log3 $name, 4, "$hash->{TYPE} $name : Link Musiccast send setServerInfo to unlink all $sendto Json Request ".$json;
