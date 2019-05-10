@@ -4877,17 +4877,63 @@ sub YAMAHA_MC_UnLink($$$@)
 	}
 	else {
 
+		#------------------
+    #
+	  # now send the client list to server
+	  # 
+	  #------------------------------------------------  
+	  #post /YamahaExtendedControl/v1/dist/setServerInfo
+	  ##{"group_id":"","type":"remove","zone":"main","client_list":["192.168.0.28"]}
+	  
+	  my $distype="remove";
+	  my $zone=$serverZone;
+	  
+	  Log3 $name, 4, "$hash->{TYPE} $name : UnLink Musiccast send setServerInfo client_list=" .join(";",@clientsToUnlink);
+	  
+	  $cmd="setServerInfo"; 
+	  $sendto="$serverHost"; # Server
+		$hash->{HTTPMETHOD}="POST";
+
+	 
+	  %postdata_hash = ('group_id'=>"",'type'=>$distype,'zone'=>$zone,'client_list'=>\@clientsToUnlink);
+	  $json = encode_json \%postdata_hash;
+	  
+	  Log3 $name, 4, "$hash->{TYPE} $name : UnLink Musiccast send setServerInfo to $sendto Json Request ".$json;
+	  $hash->{POSTDATA} = $json;  
+		
+	  YAMAHA_MC_httpRequestDirect($hash, $cmd, $sendto, @params); # call fn that will do the http request
+
 		#------------------------------------------------
   	# stop Distribution - sending cmd to server 
-  	#http://192.168.0.25/YamahaExtendedControl/v1/dist/stopDistribution
-		# was hat die num=0 oder num=2 in der Doku genau zu bedeuten?
-		# eventuell muss diese angepasst werden.
+  	# http://192.168.0.25/YamahaExtendedControl/v1/dist/stopDistribution
 	  $cmd="stopDistribution"; 
   	$sendto="$serverHost"; # Server
   	$hash->{HTTPMETHOD}="GET";
    
   	Log3 $name, 4, "$hash->{TYPE} $name : Link Musiccast send stopDistribution to $sendto  ".$cmd;
   	YAMAHA_MC_httpRequestDirect($hash, $cmd, $sendto, @params); # call fn that will do the http request
+
+		 #------------------------------------------------
+  	# set new name of group
+  	# http Post to Server
+  	#http://192.168.0.25/YamahaExtendedControl/v1/dist/setGroupName
+  	#{"name":"Wohnzimmer +1 Raum"}
+  	$sendto="$serverHost"; # Server
+  	$hash->{PORT}="80";
+  	$hash->{HTTPMETHOD}="POST";
+  	$cmd="setGroupName";   
+
+    my $groupName = "";
+  	%postdata_hash = ('name'=>$groupName);
+  	$json = encode_json \%postdata_hash;
+  
+  	Log3 $name, 4, "$hash->{TYPE} $name : Link Musiccast Json Request ".$json;
+  	$hash->{POSTDATA} = $json;
+  
+  	Log3 $name, 4, "$hash->{TYPE} $name : Link calling httpRequestDirect now cmd:$cmd, postdata:".$hash->{POSTDATA};
+  
+  	YAMAHA_MC_httpRequestDirect($hash, $cmd, $sendto, @params); # call fn that will do the http request
+  	sleep 1;
 	}	
   
   # Disttibution Info des Servers auslesen
@@ -4900,27 +4946,6 @@ sub YAMAHA_MC_UnLink($$$@)
   Log3 $name, 4, "$hash->{TYPE}: UnLink Musiccast Ende ".$json;
   return undef;
 }
-
-
-# sub YAMAHA_MC_setNewGroupName($hash, $countClients)
-# {
-# 	Log3 $name, 4, "$hash->{TYPE} $name : Count Client IPs ".$countClientIp; 
-#   if ($countClientIp>1) {
-#     $groupName = $network_name." +".($countClientIp) ." Räume";
-#   }
-#   else {
-#     $groupName = $network_name." +".($countClientIp) ." Raum";
-#   }	
-#   %postdata_hash = ('name'=>$groupName);
-#   $json = encode_json \%postdata_hash;
-  
-#   Log3 $name, 4, "$hash->{TYPE} $name : Link Musiccast Json Request ".$json;
-#   $hash->{POSTDATA} = $json;
-  
-#   Log3 $name, 4, "$hash->{TYPE} $name : Link calling httpRequestDirect now cmd:$cmd, postdata:".$hash->{POSTDATA};
-  
-#   YAMAHA_MC_httpRequestDirect($hash, $cmd, $sendto, @params); # call fn that will do the http request
-# }
 
 ########################################################################################
 #
