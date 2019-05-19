@@ -236,6 +236,7 @@ sub YAMAHA_MC_Initialize($)
                           "powerCmdDelay ".
 						  "menuLayerDelay ".						
 						  "homebridgeMapping ".
+							"eventProcessing:0,1 ".
                           $readingFnAttributes;
 }
 
@@ -308,9 +309,21 @@ sub YAMAHA_MC_Define($$)  # only called when defined, not on reload.
     return "ERROR: invalid IPv4 address or fqdn: '$host'"
   }
   
-	#open UDP Client for incoming events
-	YAMAHA_MC_OpenUDPConn($hash);
 
+	# Init udp client port, for each device one
+  $data{YAMAHA_MC_UDPCLIENTPORTSTART} = 41100 unless(defined($data{YAMAHA_MC_UDPCLIENTPORTSTART}));
+	$hash->{UdpClientPort} = $data{YAMAHA_MC_UDPCLIENTPORTSTART};
+	$data{YAMAHA_MC_UDPCLIENTPORTSTART}++;
+
+	if(AttrVal($name, "eventProcessing", 0)){
+	  Log3 $hash->{NAME}, 2, "$hash->{TYPE}: $hash->{NAME} event Processing enabled ";
+		#open UDP Client for incoming events
+		YAMAHA_MC_OpenUDPConn($hash);
+	}
+	else
+	{
+			  Log3 $hash->{NAME}, 2, "$hash->{TYPE}: $hash->{NAME} event Processing disabled ";
+	}
 
    # if an update interval was given which is greater than zero, use it.
     if(defined($a[4]) and $a[4] > 0)
@@ -592,6 +605,22 @@ sub YAMAHA_MC_Attr(@)
 		Log3 $name, 3, "YAMAHA_MC_Attr changed attr $name $aName $aVal, start DLNASearch via Timer in 150Seks";		
 		InternalTimer(gettimeofday() + 120, 'YAMAHA_MC_getNetworkStatus', $hash, 0);
 	    InternalTimer(gettimeofday() + 150, 'YAMAHA_MC_DiscoverDLNAProcess', $hash, 0);		
+	}
+
+	# start or stop udp client when event processing is enabled/disabled
+	if(($aName eq "eventProcessing"))
+	{
+		if($aVal == 1)
+		{
+			Log3 $name, 3, "YAMAHA_MC_Attr changed attr $name $aName $aVal, start listening udp client";		
+			#open UDP Client for incoming events
+			YAMAHA_MC_OpenUDPConn($hash);	
+		}
+		elsif($aVal == 0)
+		{
+			Log3 $name, 3, "YAMAHA_MC_Attr changed attr $name $aName $aVal, stop listening udp client";		
+			YAMAHA_MC_CloseUDPConn($hash);
+		}
 	}
 
 
@@ -1778,6 +1807,13 @@ sub YAMAHA_MC_Set($$@)
   
   return if (IsDisabled $name);
 
+	# mögliche zu verbindende oder entfernende Geräte suchen
+	my $iplist = $data{YAMAHA_MC_IPLIST};
+	my @deviceList = values %$iplist;
+	@deviceList = grep { $_ ne $name } @deviceList;
+	my $deviceList_comma = join(",", @deviceList);
+
+
   $cmd = "?" unless defined $cmd;
   my $usage = "Unknown argument $cmd, choose one of ". "on:noArg ".
 	"off:noArg ".
@@ -1825,9 +1861,9 @@ sub YAMAHA_MC_Set($$@)
 	"getBluetoothInfo:noArg ".
     "enableBluetooth:true,false ".
 	"setGroupName ".
-	"mcLinkTo ".
+	"mcLinkTo:multiple," .$deviceList_comma ." ".
 	"speakfile ".
-	"mcUnLink ".	
+	"mcUnLink:multiple," .ReadingsVal($hash->{NAME},"linkedClients", "") ." ". 
 	"setServerInfo ".
 	"setClientInfo ".
 	"startDistribution ".
@@ -2650,17 +2686,9 @@ sub YAMAHA_MC_httpRequestQueue($$$;$)
 	  Log3 $name, 4, "YAMAHA_MC_httpRequestQueue ($name) - Args defined as <".$arg.">";
 	}
 	
-	#if (defined($_->{arg})) {
-	#  Log3 $name, 4, "YAMAHA_MC_httpRequestQueue ($name) - vorhandene Args defined as ".$_->{arg};
-	# }
-	
 	if (defined($cmd)) {
 	  Log3 $name, 4, "YAMAHA_MC_httpRequestQueue ($name) - cmd defined as <".$cmd.">";
 	}
-	
-	#if (defined($_->{cmd})) {
-	#  Log3 $name, 4, "YAMAHA_MC_httpRequestQueue ($name) - vorhandene cmd defined as ".$_->{cmd};
-	# }
 	
 	if(@{$hash->{helper}{CMD_QUEUE}}){
      Log3 $name, 4, "YAMAHA_MC_httpRequestQueue ($name) - + Es gibt noch pending commands";
@@ -2767,8 +2795,8 @@ sub YAMAHA_MC_HandleCmdQueue($$$)
 	 # musiccsast Befehle direkt ausführen
 	 # alles andere per queue logik
 	 if ($reqCmd eq "mcLinkTo"){
-	   Log3 $name, 4, "$type YAMAHA_MC_HandleCmdQueue: musiccast cmd direct execution via YAMAHA_MC_Link";
-	   YAMAHA_MC_Link($hash,$name,$reqCmd, $reqArg);
+	   Log3 $name, 4, "$type YAMAHA_MC_HandleCmdQueue: musiccast cmd direct execution via YAMAHA_MC_Link_GetDistribution";
+	   YAMAHA_MC_GetCurrentDistribution($hash,$name,$reqCmd, $reqArg);
 	   }	
 	 elsif ($reqCmd eq "speakfile"){
 	   Log3 $name, 4, "$type YAMAHA_MC_HandleCmdQueue: speakfile cmd direct execution via YAMAHA_MC_SpeakFile";
@@ -2776,8 +2804,8 @@ sub YAMAHA_MC_HandleCmdQueue($$$)
 	   }	  
      elsif ($reqCmd eq "mcUnLink"){
 	   Log3 $name, 4, "$type YAMAHA_MC_HandleCmdQueue: musiccast cmd direct execution via YAMAHA_MC_UnLink";
-	   YAMAHA_MC_UnLink($hash,$name,$reqCmd, $reqArg);
-	 }
+	   YAMAHA_MC_GetCurrentDistribution($hash,$name,$reqCmd, $reqArg);
+		 }
 	 else {
       Log3 $name, 4, "$type ($name) - YAMAHA_MC_HandleCmdQueue: execution cmd via CmdQueue";
 	  my $url ="";
@@ -2819,9 +2847,8 @@ sub YAMAHA_MC_HandleCmdQueue($$$)
 	   Log3 $name, 4, "$type ($name) - YAMAHA_MC_HandleCmdQueue: batch_cmd detected, replaced - new url2 is $url ";	   	   
 	 }
 	
-     # v1/main/setPower?power=on in URL ersetzen durch tatsaechliche Zone	 
-     #$url =~ s/\Q$find\E/$replace/g;	 	 
-	 #my $url_replace = $url;
+     # v1/main/setPower?power=on in URL ersetzen durch tatsaechliche Zone	
+     
 	 $url =~ s/main/$hash->{ZONE}/g;
 	 $url =~ s/ mode/&mode/g;  
 	 
@@ -2837,7 +2864,13 @@ sub YAMAHA_MC_HandleCmdQueue($$$)
 	 
 	 Log3 $name, 4, "$type ($name) - YAMAHA_MC_HandleCmdQueue: cmd=$reqCmd starte httpRequest replaced url => $url";			
   	
-		my $port = $hash->{UdpClientPort};	
+		# send header with udp port when event processing is enabled
+		my $header = "";
+		if(AttrVal($name, "eventProcessing", 0))
+		{
+					my $udpPort = $hash->{UdpClientPort};
+		 			$header = "X-AppName: MusicCast/$shortAPI\r\nX-AppPort: $udpPort";
+		}
 
 	  my $params =  {
 		url         => $url,
@@ -2848,7 +2881,7 @@ sub YAMAHA_MC_HandleCmdQueue($$$)
 		loglevel   => ($hash->{helper}{AVAILABLE} ? undef : 5),
 		#hideurl     => 0,
 		method      => "GET",
-		#header 			=> "X-AppName: MusicCast/$shortAPI\r\nX-AppPort: $port",
+		header 			=> $header,
 		hash        => $hash,
 		cmd         => $reqCmd,     #passthrouht to YAMAHA_MC_httpRequestParse
 		plist       => $plist,   #passthrouht to YAMAHA_MC_httpRequestParse
@@ -2856,7 +2889,6 @@ sub YAMAHA_MC_HandleCmdQueue($$$)
 	    callback    =>  \&YAMAHA_MC_httpRequestParse # This fn will be called when finished
 	  };
 	  
-	  #if (($cmd ne "") &&  ($YAMAHA_MC_setCmdswithoutArgs{$cmd} ne "")) {
 		
 
         unless(defined($request))
@@ -2870,8 +2902,6 @@ sub YAMAHA_MC_HandleCmdQueue($$$)
         
         $request->{options}{priority} = 4 unless(exists($request->{options}{priority}));
         delete($request->{data}) if(exists($request->{data}) and !$request->{data});
-        #$request->{data}=~ s/\[CURRENT_INPUT_TAG\]/$hash->{helper}{CURRENT_INPUT_TAG}/g if(exists($request->{data}) and exists($hash->{helper}{CURRENT_INPUT_TAG}));
-
         
         map {$hash->{helper}{".HTTP_CONNECTION"}{$_} = $params->{$_}} keys %{$params};
         map {$hash->{helper}{".HTTP_CONNECTION"}{$_} = $request->{$_}} keys %{$request};
@@ -3009,7 +3039,7 @@ sub YAMAHA_MC_getNextRequestHash($)
 }
 
 sub YAMAHA_MC_CloseUDPConn($){
-	 my ($hash) = @_;
+	my ($hash) = @_;
   my $name = $hash->{NAME};
 
   if( !$hash->{CD} ) {
@@ -3027,14 +3057,9 @@ sub YAMAHA_MC_OpenUDPConn($) {
 	my ($hash) = @_;
 	my $name = $hash->{NAME};
 	my $conn;
-	my $port = 41100;
+	my $port = $hash->{UdpClientPort};
 	## Check if connection can be opened	
-
-	# Init udp client port, for each device one listening port
-  $data{YAMAHA_MC_UDPCLIENTPORTSTART} = 41100 unless(defined($data{YAMAHA_MC_UDPCLIENTPORTSTART}));
-	$port =$data{YAMAHA_MC_UDPCLIENTPORTSTART};
-	$data{YAMAHA_MC_UDPCLIENTPORTSTART}++;
-
+	
 	eval 
 	{
 		$conn = new IO::Socket::INET (
@@ -3051,7 +3076,6 @@ sub YAMAHA_MC_OpenUDPConn($) {
 		return
 	};
 
-	$hash->{UdpClientPort} = $port;
 	Log3 $name, 5, "YAMAHA_MC $name: port        : " . $port;
 	Log3 $name, 5, "YAMAHA_MC $name: Connection        : " . Dumper($conn);
 	
@@ -3061,11 +3085,11 @@ sub YAMAHA_MC_OpenUDPConn($) {
 		$selectlist{$name}	= $hash;
 		
 		### Log Entry for debugging purposes
-		Log3 $name, 3, "YAMAHA_MC $name: Connection has been established";
+		Log3 $name, 3, "YAMAHA_MC $name: Udp Listener has been established";
 	}
 	else {
 		### Log Entry for debugging purposes
-		Log3 $name, 2, "YAMAHA_MC $name: Connection has NOT been established";
+		Log3 $name, 2, "YAMAHA_MC $name: Udp Listener has NOT been established";
 	}
 	return
 }
@@ -3087,7 +3111,7 @@ sub YAMAHA_MC_Read($) {
 	YAMAHA_MC_udpEventParse($hash, $buf);
 }
 
-sub YAMAHA_MC_udpEventParse($$$)
+sub YAMAHA_MC_udpEventParse($$)
 {
 		my($hash, $data) = @_;
 		my ($name,$type) = ($hash->{NAME},$hash->{TYPE});
@@ -3102,12 +3126,11 @@ sub YAMAHA_MC_udpEventParse($$$)
         # hash %res contains answer that must be parsed and be written into readings
         # with readings*Update...
         my %res = %{decode_json(encode_utf8($data))};
-        my @getStatusVal = split(/\,/ , $data); 
 
         #Dumps hash to log, there you can see Yamaha's response
         #see: https://wiki.selfhtml.org/wiki/Perl/Hashes
-	    	Log3 $name, 4, "$type: $name YAMAHA_MC_udpEventParse got json event, following Dumper von result \n";
-        Log3 $name, 4, Dumper(%res);
+	    	Log3 $name, 5, "$type: $name YAMAHA_MC_udpEventParse got json event, following Dumper von result \n";
+        Log3 $name, 5, Dumper(%res);
 			}
 		}
 }
@@ -4098,7 +4121,7 @@ sub YAMAHA_MC_httpRequestParse($$$)
 				@{$hash->{helper}{client_list}} = ();
 		
 
-				if (defined $client_list) {
+				if ($group_role eq "server" && defined $client_list) {
 				  Log3 $name, 4, "YAMAHA_MC ($name) YAMAHA_MC_httpRequestParse - found client_list "; 	 					  				  
 					for my $clientObject (@$client_list) {
 							my $clientIp = $clientObject->{"ip_address"};
@@ -4111,9 +4134,24 @@ sub YAMAHA_MC_httpRequestParse($$$)
 							}					  				  
 					}
 				}
+				readingsSingleUpdate($hash, "linkedClients", join(',', @clientNames), 1 );	
 
-
-				readingsSingleUpdate($hash, "linkedClients", join(';', @clientNames), 1 );	
+				my $plist = $param->{plist};
+        my @linkParams = split(",", $plist);
+				my $oldCmd = pop @linkParams;
+				if(defined $oldCmd)
+				{
+					 if($oldCmd eq "mcLinkTo")
+					 {
+						 	Log3 $name, 4, "YAMAHA_MC ($name) YAMAHA_MC_httpRequestParse - should link after got distribution infos";
+							YAMAHA_MC_Link($hash,$name,"mcLinkTo", @linkParams);
+					 }
+					 elsif($oldCmd eq "mcUnLink")
+					 {
+						  Log3 $name, 4, "YAMAHA_MC ($name) YAMAHA_MC_httpRequestParse - should unlink after got distribution infos";
+					   	YAMAHA_MC_UnLink($hash,$name, "mcUnLink", @linkParams);
+					 }
+				}
 			 }		 
             elsif($cmd eq "getBluetoothInfo"){
 				
@@ -4426,44 +4464,41 @@ sub YAMAHA_MC_hash_replace (\%$$) {
   $_[0]->{$_[2]} = delete $_[0]->{$_[1]}; # thanks mobrule!
 }
 
-sub YAMAHA_MC_httpRequestDirect($$$@)
+sub YAMAHA_MC_httpRequestDirect($$@)
 {
-  my ($hash, $cmd, $sendto, @params) = @_;
+  my ($hash, $cmd, @params) = @_;
   my ($name) = $hash->{NAME};
   my ($type) = $hash->{TYPE};
+	my $host = $hash->{HOST};
   my $url = "";
   
   my $plist = join(",",@params);
-  Log3 $name, 1, "$type: set $name $cmd sendto:$sendto Plist:$plist";
+  Log3 $name, 1, "$type: set $name $cmd sendto:$host Plist:$plist";
+    
+	if ((defined($hash->{HOST})) && (defined($hash->{PORT})) && (defined($hash->{URLCMD})))
+	{
+		  $url = "http://".$hash->{HOST}.":".$hash->{PORT}.$hash->{URLCMD};
+		  if( (defined($cmd)) && (%YAMAHA_MC_setCmdswithoutArgs)) { 
+			  $url .= $YAMAHA_MC_setCmdswithoutArgs{$cmd};			
+        Log3 $name, 4, "$type ($name) - YAMAHA_MC_httpRequestDirect: ALLOWED cmd=$cmd starte httpRequest url => $url";			
+	    }
+		 	else {
+		   	Log3 $name, 2, "$type ($name) - YAMAHA_MC_httpRequestDirect: UNALLOWED cmd=$cmd starte httpRequest url => $url";
+		 	}
+	}	 
+	else {
+	     	Log3 $name, 2, "$type ($name) - YAMAHA_MC_httpRequestDirect: Error! Host not defined!";
+	}
 
-  #my $url = "http://".$hash->{HOST}.":".$hash->{PORT}.$hash->{URLCMD};
-  
-  #TOE: Anpassungen auf "dotted" API Versionen mit "." 
-  my $shortAPI = $hash->{API_VERSION};
-  $shortAPI=~s/\.[0-9]+//;
-  Log3 $name,4,"TOe: API Version cut to $shortAPI";
-  if($cmd eq "setGroupName"){
-    $url = "http://$sendto:80/YamahaExtendedControl/v$shortAPI/dist/setGroupName";
-  }
-  elsif   ($cmd eq "setClientInfo"){
-    $url = "http://$sendto:80/YamahaExtendedControl/v$shortAPI/dist/setClientInfo";
-  }
-  elsif   ($cmd eq "setServerInfo"){
-    $url = "http://$sendto:80/YamahaExtendedControl/v$shortAPI/dist/setServerInfo";
-  }
-	 elsif   ($cmd eq "stopDistribution"){
-    $url = "http://$sendto:80/YamahaExtendedControl/v$shortAPI/dist/stopDistribution";
-  }
-  elsif   ($cmd eq "startDistribution?num=0"){
-    $url = "http://$sendto:80/YamahaExtendedControl/v$shortAPI/dist/startDistribution?num=0";
-  }
-	elsif   ($cmd eq "startDistribution?num=1"){
-    $url = "http://$sendto:80/YamahaExtendedControl/v$shortAPI/dist/startDistribution?num=1";
-  }
-	elsif   ($cmd eq "startDistribution?num=2"){
-    $url = "http://$sendto:80/YamahaExtendedControl/v$shortAPI/dist/startDistribution?num=2";
-  }
+	#TOE: Anpassungen auf "dotted" API Versionen mit "." 
+	my $shortAPI = $hash->{API_VERSION};
+	$shortAPI=~s/\.[0-9]+//;
+  Log3 $name,4," $type ($name) - YAMAHA_MC_httpRequestDirect: API Version cut to $shortAPI URL before $url";
+	 
+	#api version setzen durch korrekte Version des Devices
+	$url =~ s/v1/v$shortAPI/g;
 
+	Log3 $name, 4, "$type ($name) - YAMAHA_MC_httpRequestDirect: cmd=$cmd starte httpRequest replaced url => $url";			
 
   Log3 $name, 1, "$type: url => $url";
 
@@ -4484,6 +4519,26 @@ sub YAMAHA_MC_httpRequestDirect($$$@)
   HttpUtils_NonblockingGet($httpParams); #Do http request with params above.
 
   return undef;
+}
+
+########################################################################################
+#
+#  YAMAHA_MC_Link - before link clients to server, get current distribution infos
+#
+#
+########################################################################################
+sub YAMAHA_MC_GetCurrentDistribution($$$@)
+{
+  my ($hash, $name, $cmd, @params) = @_;
+  my $serverHost = $hash->{HOST};
+	
+	push @params, $cmd;
+	$cmd="getDistributionInfo"; 
+  $hash->{HTTPMETHOD}="GET";
+
+   # Distribution Info des Servers auslesen
+  Log3 $name, 4, "$hash->{TYPE} $name : Link Musiccast getting DistributionInfo for $name  ";
+  YAMAHA_MC_httpRequestDirect($hash, $cmd,  @params); # call fn that will do the http request 
 }
 
 ########################################################################################
@@ -4511,7 +4566,6 @@ sub YAMAHA_MC_Link($$$@)
   my $group_id =  $hash->{dist_group_id};
 	my $groupName = $hash->{dist_group_name};
 	my $group_role = $hash->{dist_group_role};
-  my $sendto="";
   my %postdata_hash = "";
   my $json = "";
   my $serverHost = $hash->{HOST};
@@ -4571,18 +4625,16 @@ sub YAMAHA_MC_Link($$$@)
 			  
 			  my $server_ip_address="$serverHost";
 			  $cmd="setClientInfo"; 
-			  $sendto="$clientIp"; # Client  
-				$hash->{HTTPMETHOD}="POST";
-
+				$clienthash->{HTTPMETHOD}="POST";
 				
 			  #%postdata_hash = ('group_id'=>$group_id,'zone'=>\@zones,'server_ip_address'=>$server_ip_address);
 			  %postdata_hash = ('group_id'=>$group_id,'zone'=>$clientZone,'server_ip_address'=>$server_ip_address);
 			  
-			  $json = encode_json \%postdata_hash;
-			  Log3 $name, 4, "$hash->{TYPE} $name : Link Musiccast send setClientInfo to $sendto Json Request ".$json;
-			  $hash->{POSTDATA} = $json;  
+			  $json = toJSON(\%postdata_hash);
+			  Log3 $name, 4, "$hash->{TYPE} $name : Link Musiccast send setClientInfo to $clientIp Json Request ".$json;
+			  $clienthash->{POSTDATA} = $json;  
 				
-			  YAMAHA_MC_httpRequestDirect($hash, $cmd, $sendto, @params); # call fn that will do the http request
+			  YAMAHA_MC_httpRequestDirect($clienthash, $cmd, @params); # call fn that will do the http request
 			  
 			  # Read Disribution Info for CLient
 			  Log3 $name, 4, "$hash->{TYPE} $name : Link Musiccast getting DistributionInfo for $mc_client ";		  
@@ -4591,9 +4643,7 @@ sub YAMAHA_MC_Link($$$@)
 			  Log3 $name, 4, "$clienthash->{NAME} $name : Link Musiccast getting DistributionInfo End";
 						
 			  Log3 $name, 4, "$name : Link Musiccast adding $clientIp to ClientList";	
-			  push @clientsToLink, $clientIp;
-			  
-			  
+			  push @clientsToLink, $clientIp;			  			  
 		   }
 	  }
   }
@@ -4617,20 +4667,18 @@ sub YAMAHA_MC_Link($$$@)
   my $distype="add";
   my $zone=$serverZone;
   
-  Log3 $name, 4, "$hash->{TYPE} $name : Link Musiccast send setServerInfo client_list= ".join(";",@clientsToLink);
+  Log3 $name, 4, "$hash->{TYPE} $name : Link Musiccast send setServerInfo client_list= ".join(",",@clientsToLink);
   
   $cmd="setServerInfo"; 
-  $sendto="$serverHost"; # Server
 	$hash->{HTTPMETHOD}="POST";
-
  
   %postdata_hash = ('group_id'=>$group_id,'type'=>$distype,'zone'=>$zone,'client_list'=>\@clientsToLink);
-  $json = encode_json \%postdata_hash;
+  $json = toJSON(\%postdata_hash);
   
-  Log3 $name, 4, "$hash->{TYPE} $name : Link Musiccast send setServerInfo to $sendto Json Request ".$json;
+  Log3 $name, 4, "$hash->{TYPE} $name : Link Musiccast send setServerInfo to $serverHost Json Request ".$json;
   $hash->{POSTDATA} = $json;  
     
-  YAMAHA_MC_httpRequestDirect($hash, $cmd, $sendto, @params); # call fn that will do the http request
+  YAMAHA_MC_httpRequestDirect($hash, $cmd, @params); # call fn that will do the http request
   
   sleep 1;
 
@@ -4646,12 +4694,11 @@ sub YAMAHA_MC_Link($$$@)
 	#	$cmd="startDistribution?num=1";
 	#}
 
-	$cmd="startDistribution?num=0"; 
-  $sendto="$serverHost"; # Server
+	$cmd="startDistribution"; 
   $hash->{HTTPMETHOD}="GET";
    
-  Log3 $name, 4, "$hash->{TYPE} $name : Link Musiccast send startDistribution to $sendto  ".$cmd;
-  YAMAHA_MC_httpRequestDirect($hash, $cmd, $sendto, @params); # call fn that will do the http request
+  Log3 $name, 4, "$hash->{TYPE} $name : Link Musiccast send startDistribution to $serverHost  ".$cmd;
+  YAMAHA_MC_httpRequestDirect($hash, $cmd, @params); # call fn that will do the http request
   
   # Disttibution Info des Servers auslesen
   Log3 $name, 4, "$hash->{TYPE} $name : Link Musiccast getting DistributionInfo for $name  ";
@@ -4664,33 +4711,37 @@ sub YAMAHA_MC_Link($$$@)
   # http Post to Server
   #http://192.168.0.25/YamahaExtendedControl/v1/dist/setGroupName
   #{"name":"Wohnzimmer +1 Raum"}
-  $sendto="$serverHost"; # Server
   $hash->{PORT}="80";
   $hash->{HTTPMETHOD}="POST";
   $cmd="setGroupName";   
 
 	my $countLinkedClients=scalar(@clientList); 
   $countLinkedClients = $countLinkedClients + $countClientsToLink;
-  
-  Log3 $name, 4, "$hash->{TYPE} $name : Count Client IPs ".$countLinkedClients; 
+  	
+	Log3 $name, 4, "$hash->{TYPE} $name : Count Client IPs ".$countLinkedClients; 
   if ($countLinkedClients>1) {
-    $groupName = $network_name." +".($countLinkedClients) ." Räume";
+    $groupName = $network_name." + ".($countLinkedClients) ." Räume";
   }
   else {
-    $groupName = $network_name." +".($countLinkedClients) ." Raum";
+    $groupName = $network_name." + ".($countLinkedClients) ." Raum";
   }	
+	Log3 $name, 4, "$hash->{TYPE} $name : Link Musiccast new group name ".$groupName;
   %postdata_hash = ('name'=>$groupName);
-  $json = encode_json \%postdata_hash;
+  $json = toJSON(\%postdata_hash);
   
   Log3 $name, 4, "$hash->{TYPE} $name : Link Musiccast Json Request ".$json;
   $hash->{POSTDATA} = $json;
   
   Log3 $name, 4, "$hash->{TYPE} $name : Link calling httpRequestDirect now cmd:$cmd, postdata:".$hash->{POSTDATA};
   
-  YAMAHA_MC_httpRequestDirect($hash, $cmd, $sendto, @params); # call fn that will do the http request
-  sleep 1;
+  YAMAHA_MC_httpRequestDirect($hash, $cmd, @params); # call fn that will do the http request
   
+ # Disttibution Info des Servers auslesen
+  Log3 $name, 4, "$hash->{TYPE} $name : Link Musiccast getting DistributionInfo for $name  ";
   
+  # getting new distribtion info for server
+	YAMAHA_MC_getDistributionInfo($hash, 3);
+
   Log3 $name, 4, "$hash->{TYPE} $name : Link Musiccast Ende ".$json;
   return undef;
 }
@@ -4719,7 +4770,6 @@ sub YAMAHA_MC_UnLink($$$@)
   
   my $reset_group_id = "";
   my $old_group_id = $hash->{dist_group_id};
-  my $sendto="";
   my $groupName = "";
   my %postdata_hash = "";
   my $json = "";
@@ -4735,13 +4785,12 @@ sub YAMAHA_MC_UnLink($$$@)
 	my @clientList = @{$hash->{helper}{client_list}};
   my @clientsToUnlink = ();
 
-	Log3 $name, 4, "$hash->{TYPE} $name : UnLink Musiccast actual client_list=" .join(";",@clientList);
+	Log3 $name, 4, "$hash->{TYPE} $name : UnLink Musiccast actual client_list=" .join(",",@clientList);
 
   #
-  # unlinking all clients by deleting groupid
+  # unlinking clients by deleting groupid
   #
-  #1. set serverinfo {"group_id":""}   
-  #2. set clientinfo {"group_id":""}  
+  # set clientinfo {"group_id":""}  
   my @mc_clients = split(",", $clientName);
   foreach my $mc_client (@mc_clients) {
     Log3 $name, 4, "$hash->{TYPE} $name: UNLink Musiccast device ".$mc_client;
@@ -4759,33 +4808,31 @@ sub YAMAHA_MC_UnLink($$$@)
 	  # if device found with ip	and then send client signal to device
 	  if (($clientIp ne "") && ($clientType eq "YAMAHA_MC") && ($clientIp ne $serverHost) && ($clientIp ~~ @clientList))
 	  {
-	  #------------------------------------------------
-	  #an Receiver -> als Client setzen
-	  #post /YamahaExtendedControl/v1/dist/setClientInfo  
-		
-	  Log3 $name, 4, "$hash->{TYPE} $name : UNLink Musiccast send setClientInfo";
+			#------------------------------------------------
+			#an Receiver -> als Client setzen
+			#post /YamahaExtendedControl/v1/dist/setClientInfo  
+			
+			Log3 $name, 4, "$hash->{TYPE} $name : UNLink Musiccast send setClientInfo";
 
-	  $cmd="setClientInfo"; 
-	  $sendto="$clientIp"; # Client  
-		$hash->{HTTPMETHOD}="POST";
+			$cmd="setClientInfo"; 
+			$clienthash->{HTTPMETHOD}="POST";
+			
+			%postdata_hash = ('group_id'=>$reset_group_id,'zone'=>$clientZone);
+			$json = toJSON(\%postdata_hash);
+			Log3 $name, 4, "$hash->{TYPE} $name : UnLink Musiccast send setClientInfo to $clientIp Zone $clientZone Json Request ".$json;
+			$clienthash->{POSTDATA} = $json;  
+			
+			YAMAHA_MC_httpRequestDirect($clienthash, $cmd, @params); # call fn that will do the http request	  
+			
+			# Read Disribution Info for CLient
+			Log3 $name, 4, "$hash->{TYPE} $name : UnLink Musiccast getting DistributionInfo for $mc_client ";		  
+			Log3 $name, 4, "$name : UnLink Musiccast getting DistributionInfo Ende for ". $clienthash->{NAME}; 
+			YAMAHA_MC_getDistributionInfo($clienthash, 3);
+			Log3 $name, 4, "$clienthash->{NAME} $name : UnLink Musiccast getting DistributionInfo End";
+							
+			Log3 $name, 4, "$name : UnLink Musiccast adding $clientIp to clientsToUnlink";	
 
-		
-	  %postdata_hash = ('group_id'=>$reset_group_id,'zone'=>$clientZone);
-	  $json = encode_json \%postdata_hash;
-	  Log3 $name, 4, "$hash->{TYPE} $name : UnLink Musiccast send setClientInfo to $sendto Zone $clientZone Json Request ".$json;
-	  $hash->{POSTDATA} = $json;  
-		
-	  YAMAHA_MC_httpRequestDirect($hash, $cmd, $sendto, @params); # call fn that will do the http request	  
-		
-		# Read Disribution Info for CLient
-		Log3 $name, 4, "$hash->{TYPE} $name : UnLink Musiccast getting DistributionInfo for $mc_client ";		  
-		Log3 $name, 4, "$name : UnLink Musiccast getting DistributionInfo Ende for ". $clienthash->{NAME}; 
-		YAMAHA_MC_getDistributionInfo($clienthash, 3);
-		Log3 $name, 4, "$clienthash->{NAME} $name : UnLink Musiccast getting DistributionInfo End";
-						
-		Log3 $name, 4, "$name : UnLink Musiccast adding $clientIp to clientsToUnlink";	
-
-		push @clientsToUnlink, $clientIp;
+			push @clientsToUnlink, $clientIp;
     }  
   }
   
@@ -4818,20 +4865,18 @@ sub YAMAHA_MC_UnLink($$$@)
 	  my $distype="remove";
 	  my $zone=$serverZone;
 	  
-	  Log3 $name, 4, "$hash->{TYPE} $name : UnLink Musiccast send setServerInfo client_list=" .join(";",@clientsToUnlink);
+	  Log3 $name, 4, "$hash->{TYPE} $name : UnLink Musiccast send setServerInfo client_list=" .join(",",@clientsToUnlink);
 	  
 	  $cmd="setServerInfo"; 
-	  $sendto="$serverHost"; # Server
 		$hash->{HTTPMETHOD}="POST";
-
 	 
 	  %postdata_hash = ('group_id'=>$old_group_id,'type'=>$distype,'zone'=>$zone,'client_list'=>\@clientsToUnlink);
-	  $json = encode_json \%postdata_hash;
+  	$json = toJSON(\%postdata_hash);
 	  
-	  Log3 $name, 4, "$hash->{TYPE} $name : UnLink Musiccast send setServerInfo to $sendto Json Request ".$json;
+	  Log3 $name, 4, "$hash->{TYPE} $name : UnLink Musiccast send setServerInfo to $serverHost Json Request ".$json;
 	  $hash->{POSTDATA} = $json;  
 		
-	  YAMAHA_MC_httpRequestDirect($hash, $cmd, $sendto, @params); # call fn that will do the http request
+	  YAMAHA_MC_httpRequestDirect($hash, $cmd,  @params); # call fn that will do the http request
 	  #sleep 1;
 	  
 		#------------------------------------------------
@@ -4839,19 +4884,17 @@ sub YAMAHA_MC_UnLink($$$@)
   	#http://192.168.0.25/YamahaExtendedControl/v1/dist/startDistribution?num=2
 		# was hat die num=0 oder num=2 in der Doku genau zu bedeuten?
 		# eventuell muss diese angepasst werden.
-	  $cmd="startDistribution?num=2"; 
-  	$sendto="$serverHost"; # Server
+	  $cmd="startDistribution"; 
   	$hash->{HTTPMETHOD}="GET";
    
-  	Log3 $name, 4, "$hash->{TYPE} $name : Link Musiccast send startDistribution to $sendto  ".$cmd;
-  	YAMAHA_MC_httpRequestDirect($hash, $cmd, $sendto, @params); # call fn that will do the http request
+  	Log3 $name, 4, "$hash->{TYPE} $name : Link Musiccast send startDistribution to $serverHost  ".$cmd;
+  	YAMAHA_MC_httpRequestDirect($hash, $cmd,  @params); # call fn that will do the http request
   
 	  #------------------------------------------------
   	# set new name of group
   	# http Post to Server
   	#http://192.168.0.25/YamahaExtendedControl/v1/dist/setGroupName
   	#{"name":"Wohnzimmer +1 Raum"}
-  	$sendto="$serverHost"; # Server
   	$hash->{PORT}="80";
   	$hash->{HTTPMETHOD}="POST";
   	$cmd="setGroupName";   
@@ -4859,23 +4902,33 @@ sub YAMAHA_MC_UnLink($$$@)
     my $groupName = "";
   	Log3 $name, 4, "$hash->{TYPE} $name : Count Client IPs ".$newCountLinkedClients; 
   	if ($newCountLinkedClients>1) {
-    	$groupName = $network_name." +".($newCountLinkedClients) ." Räume";
+    	$groupName = $network_name." + ".($newCountLinkedClients) ." Räume";
   	}
   	else {
-    	$groupName = $network_name." +".($newCountLinkedClients) ." Raum";
+    	$groupName = $network_name." + ".($newCountLinkedClients) ." Raum";
   	}	
+		Log3 $name, 4, "$hash->{TYPE} $name : Link Musiccast new group name ".$groupName;
   	%postdata_hash = ('name'=>$groupName);
-  	$json = encode_json \%postdata_hash;
+  	$json = toJSON(\%postdata_hash);
   
   	Log3 $name, 4, "$hash->{TYPE} $name : Link Musiccast Json Request ".$json;
   	$hash->{POSTDATA} = $json;
   
   	Log3 $name, 4, "$hash->{TYPE} $name : Link calling httpRequestDirect now cmd:$cmd, postdata:".$hash->{POSTDATA};
   
-  	YAMAHA_MC_httpRequestDirect($hash, $cmd, $sendto, @params); # call fn that will do the http request
+  	YAMAHA_MC_httpRequestDirect($hash, $cmd, @params); # call fn that will do the http request
   	sleep 1;
 	}
 	else {
+
+    #------------------------------------------------
+  	# stop Distribution - sending cmd to server 
+  	# http://192.168.0.25/YamahaExtendedControl/v1/dist/stopDistribution
+	  $cmd="stopDistribution"; 
+  	$hash->{HTTPMETHOD}="GET";
+   
+  	Log3 $name, 4, "$hash->{TYPE} $name : Link Musiccast send stopDistribution to $serverHost  ".$cmd;
+  	YAMAHA_MC_httpRequestDirect($hash, $cmd, @params); # call fn that will do the http request
 
 		#------------------
     #
@@ -4888,51 +4941,40 @@ sub YAMAHA_MC_UnLink($$$@)
 	  my $distype="remove";
 	  my $zone=$serverZone;
 	  
-	  Log3 $name, 4, "$hash->{TYPE} $name : UnLink Musiccast send setServerInfo client_list=" .join(";",@clientsToUnlink);
+	  Log3 $name, 4, "$hash->{TYPE} $name : UnLink Musiccast send setServerInfo client_list=" .join(",",@clientsToUnlink);
 	  
 	  $cmd="setServerInfo"; 
-	  $sendto="$serverHost"; # Server
 		$hash->{HTTPMETHOD}="POST";
 
 	 
 	  %postdata_hash = ('group_id'=>"",'type'=>$distype,'zone'=>$zone,'client_list'=>\@clientsToUnlink);
-	  $json = encode_json \%postdata_hash;
+  	$json = toJSON(\%postdata_hash);
 	  
-	  Log3 $name, 4, "$hash->{TYPE} $name : UnLink Musiccast send setServerInfo to $sendto Json Request ".$json;
+	  Log3 $name, 4, "$hash->{TYPE} $name : UnLink Musiccast send setServerInfo to $serverHost Json Request ".$json;
 	  $hash->{POSTDATA} = $json;  
 		
-	  YAMAHA_MC_httpRequestDirect($hash, $cmd, $sendto, @params); # call fn that will do the http request
+	  YAMAHA_MC_httpRequestDirect($hash, $cmd, @params); # call fn that will do the http request
 
+		
 		#------------------------------------------------
-  	# stop Distribution - sending cmd to server 
-  	# http://192.168.0.25/YamahaExtendedControl/v1/dist/stopDistribution
-	  $cmd="stopDistribution"; 
-  	$sendto="$serverHost"; # Server
-  	$hash->{HTTPMETHOD}="GET";
-   
-  	Log3 $name, 4, "$hash->{TYPE} $name : Link Musiccast send stopDistribution to $sendto  ".$cmd;
-  	YAMAHA_MC_httpRequestDirect($hash, $cmd, $sendto, @params); # call fn that will do the http request
-
-		 #------------------------------------------------
   	# set new name of group
   	# http Post to Server
   	#http://192.168.0.25/YamahaExtendedControl/v1/dist/setGroupName
   	#{"name":"Wohnzimmer +1 Raum"}
-  	$sendto="$serverHost"; # Server
   	$hash->{PORT}="80";
   	$hash->{HTTPMETHOD}="POST";
   	$cmd="setGroupName";   
 
     my $groupName = "";
   	%postdata_hash = ('name'=>$groupName);
-  	$json = encode_json \%postdata_hash;
+  	$json = toJSON(\%postdata_hash);
   
   	Log3 $name, 4, "$hash->{TYPE} $name : Link Musiccast Json Request ".$json;
   	$hash->{POSTDATA} = $json;
   
   	Log3 $name, 4, "$hash->{TYPE} $name : Link calling httpRequestDirect now cmd:$cmd, postdata:".$hash->{POSTDATA};
   
-  	YAMAHA_MC_httpRequestDirect($hash, $cmd, $sendto, @params); # call fn that will do the http request
+  	YAMAHA_MC_httpRequestDirect($hash, $cmd, @params); # call fn that will do the http request
   	sleep 1;
 	}	
   
@@ -4940,7 +4982,7 @@ sub YAMAHA_MC_UnLink($$$@)
   Log3 $name, 4, "$hash->{TYPE} $name : Link Musiccast getting DistributionInfo for $name  ";
   
   # getting new distribtion info for server
-  YAMAHA_MC_httpRequestQueue($hash, "getDistributionInfo", "", {options => {priority => 3, unless_in_queue => 1}}); # call fn that will do the http request
+	YAMAHA_MC_getDistributionInfo($hash, 3);
 
      
   Log3 $name, 4, "$hash->{TYPE}: UnLink Musiccast Ende ".$json;
@@ -5182,7 +5224,11 @@ You may go through the menu and selects all menu items given as parameter from l
 	<br><br>
 	<li><a name="YAMAHA_MC_FavoriteNetRadioChannel">FavoriteNetRadioChannel</a></li>
     Neccessary attribute if you want to use TurnFavNetRadioChannelOn. This is the channel number of your most favourite channel in your list of personal favourite channels. Starts with channel 0.<br>
-	
+	<br><br>
+	<li><a name="YAMAHA_MC_eventProcessing">eventProcessing</a></li>
+       Optional attribute to enable the udp listener. Status updates will be pushed from musiccast device to fhem via UDP events.<br>
+			  <br>
+      Possible values: 0 => disable event processing, 1 => enable event processing<br><br>	
 	</ul>
 
   <br>
